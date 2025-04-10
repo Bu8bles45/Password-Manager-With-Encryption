@@ -1,8 +1,14 @@
+import tkinter as tk
+from tkinter import messagebox, simpledialog
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import serialization
 import os
+import json
+
+PASSWORD_FILE = "passwords.json"
+SESSION_KEY_FILE = "session_key.bin"
 
 # Step 1: Generate Server's RSA Keys
 def generate_rsa_key_pair():
@@ -10,99 +16,97 @@ def generate_rsa_key_pair():
     public_key = private_key.public_key()
     return private_key, public_key
 
-# Step 2: Simulate TLS Handshake
+# Step 2: Simulate TLS Handshake and persist the session key
 def tls_handshake():
-    print("Starting TLS Handshake...")
-    
-    # Server generates RSA keys
-    server_private_key, server_public_key = generate_rsa_key_pair()
-
-    # Client generates a session key 
-    session_key = os.urandom(32)  # Random 32-byte AES key
-
-    # Client encrypts session key using server's public key
-    encrypted_session_key = server_public_key.encrypt(
-        session_key,
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=SHA256()),
-            algorithm=SHA256(),
-            label=None
-        )
-    )
-
-    # Server decrypts session key using its private key
-    decrypted_session_key = server_private_key.decrypt(
-        encrypted_session_key,
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=SHA256()),
-            algorithm=SHA256(),
-            label=None
-        )
-    )
-
-    print("TLS Handshake Complete: Session key established.")
+    if os.path.exists(SESSION_KEY_FILE):
+        with open(SESSION_KEY_FILE, 'rb') as f:
+            session_key = f.read()
+        print("Loaded existing session key.")
+    else:
+        print("Generating new session key (simulated TLS Handshake)...")
+        server_private_key, server_public_key = generate_rsa_key_pair()
+        session_key = os.urandom(32)
+        with open(SESSION_KEY_FILE, 'wb') as f:
+            f.write(session_key)
+        print("Session key saved.")
     return session_key
 
-# Step 3: Secure Password Storage
-def secure_password_storage(session_key):
-    password_dict = {}  # Stores encrypted passwords
+# Step 3: GUI + Password Logic
+class PasswordManagerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Secure Password Manager")
 
-    while True:
-        print("\n1. Store Password")
-        print("2. Retrieve Password")
-        print("3. View Encrypted Password")
-        print("4. Exit")
-        choice = input("Choose an option: ")
+        self.session_key = tls_handshake()
+        self.password_dict = self.load_passwords()
 
-        if choice == "1":
-            website = input("Enter website: ")
-            password = input("Enter password: ")
+        tk.Label(root, text="Secure Password Manager", font=("Helvetica", 16)).pack(pady=10)
 
-            iv = os.urandom(16)  # Generate a random IV
-            cipher = Cipher(algorithms.AES(session_key), modes.CFB(iv))
+        tk.Button(root, text="Store Password", command=self.store_password).pack(pady=5)
+        tk.Button(root, text="Retrieve Password", command=self.retrieve_password).pack(pady=5)
+        tk.Button(root, text="View Encrypted Password", command=self.view_encrypted_password).pack(pady=5)
+        tk.Button(root, text="Exit", command=self.save_and_exit).pack(pady=5)
+
+    def store_password(self):
+        website = simpledialog.askstring("Store Password", "Enter website:")
+        password = simpledialog.askstring("Store Password", "Enter password:", show='*')
+
+        if website and password:
+            iv = os.urandom(16)
+            cipher = Cipher(algorithms.AES(self.session_key), modes.CFB(iv))
             encryptor = cipher.encryptor()
             encrypted_password = encryptor.update(password.encode()) + encryptor.finalize()
 
-            password_dict[website] = (iv, encrypted_password)
-            print(f"Password for {website} stored securely!")
+            self.password_dict[website] = {
+                "iv": iv.hex(),
+                "encrypted_password": encrypted_password.hex()
+            }
+            messagebox.showinfo("Success", f"Password for {website} stored securely!")
 
-        elif choice == "2":
-            website = input("Enter website: ")
-            if website in password_dict:
-                iv, encrypted_password = password_dict[website]
+    def retrieve_password(self):
+        website = simpledialog.askstring("Retrieve Password", "Enter website:")
+        entry = self.password_dict.get(website)
 
-                cipher = Cipher(algorithms.AES(session_key), modes.CFB(iv))
+        if entry:
+            try:
+                iv = bytes.fromhex(entry["iv"])
+                encrypted_password = bytes.fromhex(entry["encrypted_password"])
+                cipher = Cipher(algorithms.AES(self.session_key), modes.CFB(iv))
                 decryptor = cipher.decryptor()
                 decrypted_password = decryptor.update(encrypted_password) + decryptor.finalize()
-
-                print(f"Decrypted Password for {website}: {decrypted_password.decode()}")
-            else:
-                print("No password stored for this website.")
-
-        elif choice == "3":
-            website = input("Enter website to view encrypted password: ")
-            view_encrypted_password(password_dict, website)
-
-        elif choice == "4":
-            break
-
+                messagebox.showinfo("Decrypted Password", f"{website}: {decrypted_password.decode()}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Decryption failed: {str(e)}")
         else:
-            print("Invalid choice! Try again.")
+            messagebox.showerror("Error", "No password stored for this website.")
 
-# Step 4: View Encrypted Password for a Specific Website
-def view_encrypted_password(password_dict, website):
-    if website in password_dict:
-        iv, encrypted_password = password_dict[website]
-        print(f"\nWebsite: {website}")
-        print(f"IV: {iv.hex()}")  # Display IV in hex
-        print(f"Encrypted Password: {encrypted_password.hex()}")  # Display encrypted password in hex
-    else:
-        print("No password stored for this website.")
+    def view_encrypted_password(self):
+        website = simpledialog.askstring("View Encrypted", "Enter website:")
+        entry = self.password_dict.get(website)
 
-# Main Simulation
+        if entry:
+            msg = (
+                f"Website: {website}\n"
+                f"IV: {entry['iv']}\n"
+                f"Encrypted Password: {entry['encrypted_password']}"
+            )
+            messagebox.showinfo("Encrypted Password", msg)
+        else:
+            messagebox.showerror("Error", "No password stored for this website.")
+
+    def load_passwords(self):
+        if os.path.exists(PASSWORD_FILE):
+            with open(PASSWORD_FILE, 'r') as f:
+                return json.load(f)
+        return {}
+
+    def save_and_exit(self):
+        with open(PASSWORD_FILE, 'w') as f:
+            json.dump(self.password_dict, f, indent=4)
+        self.root.quit()
+
+# Step 4: Run App
 if __name__ == "__main__":
-    # Perform TLS Handshake
-    session_key = tls_handshake()
-
-    # Securely store and retrieve passwords
-    secure_password_storage(session_key)
+    root = tk.Tk()
+    app = PasswordManagerApp(root)
+    root.mainloop()
